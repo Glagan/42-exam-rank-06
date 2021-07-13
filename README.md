@@ -2,7 +2,7 @@
 
 The goal of **mini_serv** is to create a simple server where client can connect and exchange messages.
 
-The ``extract_message`` and ``str_join`` functions are given to you in the subject folder.
+The ``extract_message`` and ``str_join`` functions are given to you when passing the exam, they are in ``main.c`` in the subject folder.
 
 ## Compilation
 
@@ -15,12 +15,11 @@ gcc -Wall -Wextra -Werror client.c -o client
 
 ## Usage
 
-You first need to start **mini_serv** on a given port: ``./mini_serv 3033`` for example.
+You first need to start **mini_serv** on a given port: ``./mini_serv 8081`` for example.
 
-You can then connect up to ``MAX_CLIENTS`` (see ``mini_serv.c:12``) with ``./client 3033``.
+You can then connect with the test client on the same port as the server ``./client 8081``.  
+You can type your message and press ``Enter`` and it will be sent to the server.
 
 ## Resources
 
-* socket
-* select
-* non-blocking socket
+* Your own ``webserv``/``ft_irc`` project
