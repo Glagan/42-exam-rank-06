@@ -12,16 +12,6 @@
 
 #define BUFFER_SIZE 65535
 
-char* messages[255] = {
-	"Hello !\n",
-	"world ?\n",
-	"This is a message.\n",
-	"There is two lines\nhere is the second one\n",
-	"I'm not going to add a new line here",
-	NULL
-};
-size_t messages_length = 5;
-
 volatile sig_atomic_t running;
 
 void stop() {
@@ -55,6 +45,7 @@ int main(int argc, char** argv) {
 		return -1;
 	}
 	fcntl(sockfd, F_SETFL, O_NONBLOCK);
+	fcntl(STDIN_FILENO, F_SETFL, O_NONBLOCK);
 	printf("Connected to Server port %d\n", port);
 
 	// Main Loop
@@ -62,33 +53,27 @@ int main(int argc, char** argv) {
 	char buffer[BUFFER_SIZE];
 	signal(SIGINT, stop);
 
-	fd_set read_fds;
-	fd_set write_fds;
-	struct timeval timeout;
+	fd_set reads;
+	fd_set writes;
 
-	size_t current_message = 0;
 	running = 1;
 	int do_send = 0;
-	struct timespec last, start;
-	clock_gettime(CLOCK_MONOTONIC_RAW, &start);
 	while (running) {
-		timeout.tv_sec = 1;
-		timeout.tv_usec = 0;
-
-		FD_ZERO(&read_fds);
-		FD_ZERO(&write_fds);
-		FD_SET(sockfd, &read_fds);
+		FD_ZERO(&reads);
+		FD_ZERO(&writes);
+		FD_SET(sockfd, &reads);
+		FD_SET(STDIN_FILENO, &reads);
 		if (do_send)
-			FD_SET(sockfd, &write_fds);
+			FD_SET(sockfd, &writes);
 
-		int activity = select(sockfd + 1, &read_fds, &write_fds, NULL, &timeout);
+		int activity = select(sockfd + 1, &reads, &writes, NULL, NULL);
 		if (activity > 0) {
-			if (FD_ISSET(sockfd, &read_fds)) {
+			if (FD_ISSET(sockfd, &reads)) {
 				int received = recv(sockfd, buffer, 65535, MSG_DONTWAIT);
 				if (received < 0) {
 					perror("recv()");
 					close(sockfd);
-					return 0;
+					return 1;
 				}
 				else if (received == 0) {
 					printf("Server disconnected\n");
@@ -100,20 +85,26 @@ int main(int argc, char** argv) {
 					printf("%s", buffer);
 				}
 			}
-			else if (FD_ISSET(sockfd, &write_fds) && do_send) {
-				char* message = messages[current_message];
-				size_t length = strlen(message);
-				send(sockfd, message, length, MSG_DONTWAIT);
+			else if (FD_ISSET(sockfd, &writes) && do_send) {
+				size_t length = strlen(buffer);
+				send(sockfd, buffer, length, MSG_DONTWAIT);
 				do_send = 0;
-				clock_gettime(CLOCK_MONOTONIC_RAW, &start);
-				current_message = (current_message + 1) % messages_length;
+			}
+			if (FD_ISSET(STDIN_FILENO, &reads)) {
+				ssize_t typed = read(STDIN_FILENO, buffer, BUFFER_SIZE);
+				if (typed < 0) {
+					perror("read()");
+					close(sockfd);
+					return 1;
+				}
+				else {
+					buffer[typed] = 0;
+					do_send = 1;
+				}
 			}
 		}
 		/*else if (activity == 0)
 			printf("Timed out\n");*/
-		clock_gettime(CLOCK_MONOTONIC_RAW, &last);
-		if (last.tv_sec - start.tv_sec >= 1)
-			do_send = 1;
 	}
 
 	close(sockfd);
