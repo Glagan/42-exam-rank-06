@@ -9,8 +9,6 @@
 #include <string.h>
 #include <signal.h>
 
-#define MAX_CLIENTS 10
-#define MAX_QUEUE 64
 #define BUFFER_SIZE 65535
 
 volatile sig_atomic_t running;
@@ -20,48 +18,47 @@ void stop() {
 }
 
 typedef struct s_message {
+	char* content;
 	size_t sender;
-	char* msg;
 	size_t length;
+	size_t offset;
+	struct s_message* next;
 } message;
 
 typedef struct s_client {
 	size_t id;
 	int fd;
-	char* rcv_buffer;
-	size_t offset;
-	size_t total_size;
-	message queue[MAX_QUEUE];
-	size_t queue_length;
+	char* buffer;
+	message* queue;
+	struct s_client* next;
 } client;
 
 typedef struct s_state {
-	fd_set read;
-	fd_set write;
 	size_t total;
-	client clients[MAX_CLIENTS];
+	client* clients;
 } state;
 
 // Split buf by line and returns the first line or until it's end.
-char* extract_message(const char* buffer, size_t length) {
-	size_t i = 0;
-	char* result = NULL;
+int extract_message(const char* buffer, char** stk) {
+	int i = 0;
+	char* cpy = NULL;
 
-	while (i < length) {
-		if (buffer[i] == '\n')
-			break;
+	while (buffer[i]) {
+		if (buffer[i] == '\n') {
+			if (!(cpy = calloc(i + 1, sizeof(char))))
+				return -1;
+			memcpy(cpy, buffer, i + 1);
+			cpy[i + 1] = 0;
+			*stk = cpy;
+			return 1;
+		}
 		i++;
 	}
-	if (!(result = calloc(i + 1, sizeof(char))))
-		return NULL;
-	if (i > 0)
-		memcpy(result, buffer, i);
-	result[i] = 0;
-	return result;
+	return 0;
 }
 
 // Join to strings in a newly allocated string.
-char* str_join(const char* str1, const char* str2) {
+char* str_join(char* str1, char* str2) {
 	char* merged = NULL;
 	size_t len1 = strlen(str1);
 	size_t len2 = strlen(str2);
@@ -70,71 +67,76 @@ char* str_join(const char* str1, const char* str2) {
 		return NULL;
 	memcpy(merged, str1, len1);
 	memcpy(merged + len1, str2, len2);
+	free(str1);
 
 	return merged;
 }
 
-int clean_client(client* clt) {
-	if (clt->fd)
-		close(clt->fd);
-	clt->fd = 0;
-	if (clt->rcv_buffer)
-		free(clt->rcv_buffer);
-	size_t j = 0;
-	while (j < clt->queue_length) {
-		if (clt->queue[j].msg) {
-			free(clt->queue[j].msg);
-			clt->queue[j].msg = NULL;
-		}
-		j++;
+client* clean_client(client* clt) {
+	client* next_client = clt->next;
+	message* curr_msg = clt->queue;
+	while (curr_msg) {
+		message* next_msg = curr_msg->next;
+		free(curr_msg->content);
+		curr_msg->content = NULL;
+		curr_msg->next = NULL;
+		free(curr_msg);
+		curr_msg = next_msg;
 	}
-	clt->rcv_buffer = NULL;
+	clt->queue = NULL;
+	if (clt->buffer)
+		free(clt->buffer);
+	clt->buffer = NULL;
+	clt->next = NULL;
+	free(clt);
+	return next_client;
+}
+
+int broadcast(state* server, size_t sender, char* content, size_t length) {
+	client* curr = server->clients;
+	while (curr) {
+		if (curr->id != sender) {
+			message* msg = NULL;
+			if (!(msg = (message*)malloc(sizeof(message))))
+				return 1;
+			if (!(msg->content = (char*)malloc(length + 1))) {
+				free(msg);
+				return 1;
+			}
+			strcpy(msg->content, content);
+			msg->content[length] = 0;
+			msg->length = length;
+			msg->next = NULL;
+			msg->offset = 0;
+			msg->sender = sender;
+			if (!curr->queue)
+				curr->queue = msg;
+			else {
+				message* curr_msg = curr->queue;
+				while (curr_msg->next)
+					curr_msg = curr_msg->next;
+				curr_msg->next = msg;
+			}
+		}
+		curr = curr->next;
+	}
 	return 0;
 }
 
 int clean_exit(state* server, int sockfd, int return_code) {
 	if (server) {
-		int i = 0;
-		while (i < MAX_CLIENTS)
-			clean_client(&server->clients[i++]);
+		client* clt = server->clients;
+		while (clt)
+			clt = clean_client(clt);
+		server->clients = NULL;
 	}
-	if (sockfd > 0)
-		close(sockfd);
+	close(sockfd);
 	return return_code;
 }
 
-int exit_fatal(state* server, int sockfd, int return_code) {
+int exit_fatal(state* server, int sockfd) {
 	write(STDERR_FILENO, "Fatal error\n", 12);
-	return clean_exit(server, sockfd, return_code);
-}
-
-void add_to_queue(state* server, size_t sender, char* msg, size_t length) {
-	size_t i = 0;
-
-	while (i < MAX_CLIENTS) {
-		client* clt = server->clients + i;
-		if (clt->fd) {
-			clt->queue[clt->queue_length].sender = sender;
-			clt->queue[clt->queue_length].msg = msg;
-			clt->queue[clt->queue_length].length = length;
-			clt->queue_length++;
-		}
-		i++;
-	}
-}
-
-void pop_client_queue(client* clt) {
-	size_t i = 0;
-	free(clt->queue[0].msg);
-	clt->queue[0].msg = NULL;
-	while (i < clt->queue_length) {
-		clt->queue[i].sender = clt->queue[i + 1].sender;
-		clt->queue[i].msg = clt->queue[i + 1].msg;
-		clt->queue[i].length = clt->queue[i + 1].length;
-		clt->queue[i + 1].msg = NULL;
-		i++;
-	}
-	clt->queue_length--;
+	return clean_exit(server, sockfd, 1);
 }
 
 int main(int argc, char** argv) {
@@ -147,7 +149,7 @@ int main(int argc, char** argv) {
 
 	int sockfd = socket(AF_INET, SOCK_STREAM, 0);
 	if (sockfd < 0)
-		exit_fatal(NULL, -1, 1);
+		exit_fatal(NULL, -1);
 	fcntl(sockfd, F_SETFL, O_NONBLOCK);
 
 	int port = atoi(argv[1]);
@@ -159,129 +161,147 @@ int main(int argc, char** argv) {
 	self.sin_port = htons(port);
 
 	if (bind(sockfd, (struct sockaddr*)&self, len) != 0)
-		exit_fatal(NULL, sockfd, 1);
+		exit_fatal(NULL, sockfd);
 
-	if (listen(sockfd, MAX_CLIENTS) != 0)
-		exit_fatal(NULL, sockfd, 1);
+	if (listen(sockfd, 10) != 0)
+		exit_fatal(NULL, sockfd);
 
 	printf("Server open on port %d\n", port);
 
 	// Initialize server
 
 	char buffer[BUFFER_SIZE];
+	char recv_buffer[BUFFER_SIZE];
 	state server;
-	int i = 0, j;
-	while (i < MAX_CLIENTS) {
-		server.clients[i].fd = 0;
-		server.clients[i].rcv_buffer = NULL;
-		server.clients[i].queue_length = 0;
-		j = 0;
-		while (j < MAX_QUEUE)
-			server.clients[i].queue[j++].msg = NULL;
-		i++;
-	}
+	server.clients = NULL;
+	server.total = 0;
+	fd_set reads;
+	fd_set writes;
 
 	// Main Loop
 
 	running = 1;
-	struct timeval timeout;
 	signal(SIGINT, stop);
 	while (running) {
-		timeout.tv_sec = 4;
-		timeout.tv_usec = 0;
-
-		FD_ZERO(&server.read);
-		FD_ZERO(&server.write);
-		FD_SET(sockfd, &server.read);
+		FD_ZERO(&reads);
+		FD_ZERO(&writes);
+		FD_SET(sockfd, &reads);
 
 		// Add current clients to read and write
 		int max = sockfd;
-		i = 0;
-		while (i < MAX_CLIENTS) {
-			client* clt = server.clients + i;
-			if (clt->fd) {
-				printf("Added client %ld to read (%d)\n", clt->id, clt->fd);
-				FD_SET(clt->fd, &server.read);
-				if (clt->queue_length > 0) {
-					printf("Added client %ld to write (%d)\n", clt->id, clt->fd);
-					FD_SET(clt->fd, &server.write);
-				}
-				if (clt->fd > max)
-					max = clt->fd;
-			}
-			i++;
+		client* clt = server.clients;
+		while (clt) {
+			FD_SET(clt->fd, &reads);
+			if (clt->queue)
+				FD_SET(clt->fd, &writes);
+			if (clt->fd > max)
+				max = clt->fd;
+			clt = clt->next;
 		}
 
 		// Loop trough existing clients
-		printf("waiting for activity up to %d.\n", max + 1);
-		int activity = select(max + 1, &server.read, &server.write, NULL, &timeout);
-		printf("Select activity: %d\n", activity);
+		int activity = select(max + 1, &reads, &writes, NULL, NULL);
 		if (activity < 0)
-			exit_fatal(&server, sockfd, 1);
+			exit_fatal(&server, sockfd);
 		else if (activity > 0) {
 			// New client on read for the server socket
-			if (FD_ISSET(sockfd, &server.read)) {
-				printf("New client request\n");
+			if (FD_ISSET(sockfd, &reads)) {
 				int new_client = accept(sockfd, NULL, NULL);
 				if (new_client) {
 					fcntl(new_client, F_SETFL, O_NONBLOCK);
-					int j = 0;
-					while (j < MAX_CLIENTS) {
-						if (server.clients[j].fd == 0) {
-							printf("Accepted new client %d\n", new_client);
-							server.clients[j].id = server.total++;
-							server.clients[j].fd = new_client;
-							j = MAX_CLIENTS;
-						}
-						j++;
-					}
-					if (j == MAX_CLIENTS) {
-						printf("Too many clients.\n");
-						close(new_client);
+					client* clt = NULL;
+					if (!(clt = (client*)malloc(sizeof(client))))
+						return exit_fatal(&server, sockfd);
+					clt->id = server.total++;
+					clt->fd = new_client;
+					clt->buffer = NULL;
+					clt->queue = NULL;
+					clt->next = NULL;
+					if (!server.clients)
+						server.clients = clt;
+					else {
+						size_t length = sprintf(buffer, "server: client %ld just arrived\n", clt->id);
+						if (broadcast(&server, clt->id, buffer, length))
+							return exit_fatal(&server, sockfd);
+						client* curr = server.clients;
+						while (curr->next)
+							curr = curr->next;
+						curr->next = clt;
 					}
 				}
 			}
 
 			// Handle read and write
-			i = 0;
-			while (i < MAX_CLIENTS) {
-				client* clt = server.clients + i;
-				if (!clt->fd) {
-					i++;
-					continue;
-				}
-				if (FD_ISSET(clt->fd, &server.read)) {
-					printf("Receiving from %ld (%d)\n", clt->id, clt->fd);
-					size_t received = recv(clt->fd, buffer, BUFFER_SIZE - 1, MSG_DONTWAIT);
-					buffer[received] = 0;
-					if (received == 0) {
-						printf("Disconnected %ld (%d)\n", clt->id, clt->fd);
-						clean_client(&server.clients[i]);
+			client* previous = NULL;
+			client* clt = server.clients;
+			while (clt) {
+				if (FD_ISSET(clt->fd, &reads)) {
+					ssize_t received = recv(clt->fd, recv_buffer, BUFFER_SIZE - 1, MSG_DONTWAIT);
+					if (received < 0)
+						return exit_fatal(&server, sockfd);
+					else if (received == 0) {
+						size_t sender = clt->id;
+						client* next = clean_client(clt);
+						if (previous) {
+							previous->next = next;
+							size_t length = sprintf(buffer, "server: client %ld just left\n", sender);
+							if (broadcast(&server, sender, buffer, length))
+								return exit_fatal(&server, sockfd);
+						}
+						else
+							server.clients = NULL;
+						clt = next;
 					}
 					else {
-						size_t offset = 0;
+						recv_buffer[received] = 0;
+						ssize_t offset = 0;
+						char* line = NULL;
 						while (offset < received) {
-							char* line = extract_message(buffer, received);
-							if (line == NULL)
-								return exit_fatal(&server, sockfd, 1);
-							size_t length = strlen(line);
-							offset += length;
-							printf("added to queue `%s` from %ld (%d)\n", line, clt->id, clt->fd);
-							if (length > 0)
-								add_to_queue(&server, clt->id, line, length);
+							int extracted = extract_message(recv_buffer, &line);
+							if (extracted < 0)
+								return exit_fatal(&server, sockfd);
+							else if (extracted > 0) {
+								size_t length = sprintf(buffer, "client %ld: %s", clt->id, line);
+								offset += strlen(line);
+								free(line);
+								if (broadcast(&server, clt->id, buffer, length))
+									return exit_fatal(&server, sockfd);
+							}
+							else {
+								if (!clt->buffer)
+									clt->buffer = line;
+								else {
+									char* merged = str_join(clt->buffer, line);
+									clt->buffer = merged;
+									free(line);
+								}
+								offset = received;
+							}
 						}
+						previous = clt;
+						clt = clt->next;
 					}
 				}
-				else if (FD_ISSET(clt->fd, &server.write)) {
-					printf("Sending to client %ld (%d)\n", clt->id, clt->fd);
-					send(clt->fd, clt->queue[0].msg, clt->queue[0].length, MSG_DONTWAIT);
-					pop_client_queue(clt);
+				else if (FD_ISSET(clt->fd, &writes) && clt->queue) {
+					message* msg = clt->queue;
+					ssize_t sent = send(clt->fd, msg->content + msg->offset, msg->length - msg->offset, MSG_DONTWAIT);
+					if (msg->offset + sent < msg->length)
+						msg->offset += sent;
+					else {
+						message* next = msg->next;
+						free(msg->content);
+						free(msg);
+						clt->queue = next;
+					}
+					previous = clt;
+					clt = clt->next;
 				}
-				i++;
+				else {
+					previous = clt;
+					clt = clt->next;
+				}
 			}
 		}
-		else
-			printf("Timed out\n");
 	}
 
 	return clean_exit(&server, sockfd, 0);

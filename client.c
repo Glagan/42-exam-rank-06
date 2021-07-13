@@ -10,6 +10,18 @@
 #include <signal.h>
 #include <time.h>
 
+#define BUFFER_SIZE 65535
+
+char* messages[255] = {
+	"Hello !\n",
+	"world ?\n",
+	"This is a message.\n",
+	"There is two lines\nhere is the second one\n",
+	"I'm not going to add a new line here",
+	NULL
+};
+size_t messages_length = 5;
+
 volatile sig_atomic_t running;
 
 void stop() {
@@ -29,7 +41,6 @@ int main(int argc, char** argv) {
 		perror("socket()");
 		return 1;
 	}
-	// fcntl(STDIN_FILENO, F_SETFL, O_NONBLOCK);
 
 	int port = atoi(argv[1]);
 	struct sockaddr_in server_addr;
@@ -48,19 +59,20 @@ int main(int argc, char** argv) {
 
 	// Main Loop
 
-	char buffer[65536];
+	char buffer[BUFFER_SIZE];
 	signal(SIGINT, stop);
 
 	fd_set read_fds;
 	fd_set write_fds;
 	struct timeval timeout;
 
+	size_t current_message = 0;
 	running = 1;
 	int do_send = 0;
 	struct timespec last, start;
 	clock_gettime(CLOCK_MONOTONIC_RAW, &start);
 	while (running) {
-		timeout.tv_sec = 4;
+		timeout.tv_sec = 1;
 		timeout.tv_usec = 0;
 
 		FD_ZERO(&read_fds);
@@ -85,22 +97,22 @@ int main(int argc, char** argv) {
 				}
 				else {
 					buffer[received] = 0;
-					printf("[%d] %s\n", received, buffer);
-
+					printf("%s", buffer);
 				}
 			}
 			else if (FD_ISSET(sockfd, &write_fds) && do_send) {
-				printf("Sending to server\n");
-				send(sockfd, "Hello !\n", 8, MSG_DONTWAIT);
+				char* message = messages[current_message];
+				size_t length = strlen(message);
+				send(sockfd, message, length, MSG_DONTWAIT);
 				do_send = 0;
 				clock_gettime(CLOCK_MONOTONIC_RAW, &start);
+				current_message = (current_message + 1) % messages_length;
 			}
 		}
 		else if (activity == 0)
-			printf("Timed out. ");
+			printf("Timed out\n");
 		clock_gettime(CLOCK_MONOTONIC_RAW, &last);
-		printf("Elapsed: %ld\n", last.tv_sec - start.tv_sec);
-		if (last.tv_sec - start.tv_sec >= 2)
+		if (last.tv_sec - start.tv_sec >= 1)
 			do_send = 1;
 	}
 
