@@ -72,27 +72,8 @@ char* str_join(char* str1, char* str2) {
 	return merged;
 }
 
-client* clean_client(client* clt) {
-	client* next_client = clt->next;
-	message* curr_msg = clt->queue;
-	while (curr_msg) {
-		message* next_msg = curr_msg->next;
-		free(curr_msg->content);
-		curr_msg->content = NULL;
-		curr_msg->next = NULL;
-		free(curr_msg);
-		curr_msg = next_msg;
-	}
-	clt->queue = NULL;
-	if (clt->buffer)
-		free(clt->buffer);
-	clt->buffer = NULL;
-	clt->next = NULL;
-	free(clt);
-	return next_client;
-}
-
 int broadcast(state* server, size_t sender, char* content, size_t length) {
+	printf("%s", content);
 	client* curr = server->clients;
 	while (curr) {
 		if (curr->id != sender) {
@@ -121,6 +102,28 @@ int broadcast(state* server, size_t sender, char* content, size_t length) {
 		curr = curr->next;
 	}
 	return 0;
+}
+
+client* clean_client(client* clt) {
+	client* next_client = clt->next;
+	message* curr_msg = clt->queue;
+	while (curr_msg) {
+		message* next_msg = curr_msg->next;
+		free(curr_msg->content);
+		curr_msg->content = NULL;
+		curr_msg->next = NULL;
+		free(curr_msg);
+		curr_msg = next_msg;
+	}
+	clt->queue = NULL;
+	if (clt->buffer)
+		free(clt->buffer);
+	clt->buffer = NULL;
+	clt->next = NULL;
+	close(clt->fd);
+	clt->fd = 0;
+	free(clt);
+	return next_client;
 }
 
 int clean_exit(state* server, int sockfd, int return_code) {
@@ -257,23 +260,34 @@ int main(int argc, char** argv) {
 						ssize_t offset = 0;
 						char* line = NULL;
 						while (offset < received) {
-							int extracted = extract_message(recv_buffer, &line);
+							int extracted = extract_message(recv_buffer + offset, &line);
 							if (extracted < 0)
 								return exit_fatal(&server, sockfd);
 							else if (extracted > 0) {
-								size_t length = sprintf(buffer, "client %ld: %s", clt->id, line);
-								offset += strlen(line);
-								free(line);
+								char* to_send = line;
+								if (clt->buffer) {
+									to_send = str_join(clt->buffer, line);
+									free(line);
+									clt->buffer = NULL;
+								}
+								size_t length = sprintf(buffer, "client %ld: %s", clt->id, to_send);
+								offset += strlen(to_send);
 								if (broadcast(&server, clt->id, buffer, length))
 									return exit_fatal(&server, sockfd);
+								free(to_send);
 							}
 							else {
-								if (!clt->buffer)
-									clt->buffer = line;
+								if (!clt->buffer) {
+									char* cpy = NULL;
+									if (!(cpy = (char*)malloc(received + 1)))
+										return -1;
+									strcpy(cpy, recv_buffer);
+									cpy[received] = 0;
+									clt->buffer = cpy;
+								}
 								else {
-									char* merged = str_join(clt->buffer, line);
+									char* merged = str_join(clt->buffer, recv_buffer);
 									clt->buffer = merged;
-									free(line);
 								}
 								offset = received;
 							}

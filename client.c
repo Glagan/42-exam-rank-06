@@ -109,8 +109,8 @@ int main(int argc, char** argv) {
 				current_message = (current_message + 1) % messages_length;
 			}
 		}
-		else if (activity == 0)
-			printf("Timed out\n");
+		/*else if (activity == 0)
+			printf("Timed out\n");*/
 		clock_gettime(CLOCK_MONOTONIC_RAW, &last);
 		if (last.tv_sec - start.tv_sec >= 1)
 			do_send = 1;
