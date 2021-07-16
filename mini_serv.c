@@ -39,7 +39,7 @@ int extract_message(const char* buffer, char** stk) {
 
 	while (buffer[i]) {
 		if (buffer[i] == '\n') {
-			if (!(cpy = calloc(i + 1, sizeof(char))))
+			if (!(cpy = calloc(i + 2, sizeof(char))))
 				return -1;
 			memcpy(cpy, buffer, i + 1);
 			cpy[i + 1] = 0;
@@ -61,6 +61,7 @@ char* str_join(char* str1, char* str2) {
 		return NULL;
 	memcpy(merged, str1, len1);
 	memcpy(merged + len1, str2, len2);
+	merged[len1 + len2] = 0;
 	free(str1);
 
 	return merged;
@@ -279,8 +280,9 @@ int main(int argc, char** argv) {
 								char* to_send = line;
 								if (clt->buffer) {
 									to_send = str_join(clt->buffer, line);
-									free(line);
 									clt->buffer = NULL;
+									free(line);
+									line = NULL;
 								}
 								size_t length = sprintf(buffer, "client %ld: %s", clt->id, to_send);
 								free(to_send);
