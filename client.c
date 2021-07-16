@@ -19,8 +19,8 @@ void stop() {
 }
 
 int main(int argc, char** argv) {
-	if (argc != 2) {
-		printf("Usage: client [port]");
+	if (argc < 2 || argc > 3) {
+		printf("Usage: client [port] [mode]");
 		return 1;
 	}
 
@@ -55,6 +55,10 @@ int main(int argc, char** argv) {
 
 	fd_set reads;
 	fd_set writes;
+	int mode = 0;
+	int flag_ln = 0;
+	if (argc == 3)
+		mode = 1;
 
 	running = 1;
 	int do_send = 0;
@@ -89,6 +93,7 @@ int main(int argc, char** argv) {
 				size_t length = strlen(buffer);
 				send(sockfd, buffer, length, MSG_DONTWAIT);
 				do_send = 0;
+				flag_ln++;
 			}
 			if (FD_ISSET(STDIN_FILENO, &reads)) {
 				ssize_t typed = read(STDIN_FILENO, buffer, BUFFER_SIZE);
@@ -99,12 +104,12 @@ int main(int argc, char** argv) {
 				}
 				else {
 					buffer[typed] = 0;
+					if (mode && flag_ln % 2 == 0)
+						buffer[typed - 1] = 0;
 					do_send = 1;
 				}
 			}
 		}
-		/*else if (activity == 0)
-			printf("Timed out\n");*/
 	}
 
 	close(sockfd);

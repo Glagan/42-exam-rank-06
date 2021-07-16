@@ -7,15 +7,8 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <string.h>
-#include <signal.h>
 
 #define BUFFER_SIZE 65535
-
-volatile sig_atomic_t running;
-
-void stop() {
-	running = 0;
-}
 
 typedef struct s_message {
 	char* content;
@@ -35,6 +28,7 @@ typedef struct s_client {
 
 typedef struct s_state {
 	size_t total;
+	int sockfd;
 	client* clients;
 } state;
 
@@ -57,7 +51,7 @@ int extract_message(const char* buffer, char** stk) {
 	return 0;
 }
 
-// Join to strings in a newly allocated string.
+// Join to non-null strings in a newly allocated string.
 char* str_join(char* str1, char* str2) {
 	char* merged = NULL;
 	size_t len1 = strlen(str1);
@@ -126,20 +120,21 @@ client* clean_client(client* clt) {
 	return next_client;
 }
 
-int clean_exit(state* server, int sockfd, int return_code) {
+int clean_exit(state* server, int return_code) {
 	if (server) {
 		client* clt = server->clients;
 		while (clt)
 			clt = clean_client(clt);
 		server->clients = NULL;
+		if (server->sockfd > 0)
+			close(server->sockfd);
 	}
-	close(sockfd);
 	return return_code;
 }
 
-int exit_fatal(state* server, int sockfd) {
+int exit_fatal(state* server) {
 	write(STDERR_FILENO, "Fatal error\n", 12);
-	return clean_exit(server, sockfd, 1);
+	return clean_exit(server, 1);
 }
 
 int main(int argc, char** argv) {
@@ -150,10 +145,16 @@ int main(int argc, char** argv) {
 
 	// Initialize Socket
 
+	state server;
+	server.clients = NULL;
+	server.total = 0;
+	server.sockfd = 0;
+
 	int sockfd = socket(AF_INET, SOCK_STREAM, 0);
 	if (sockfd < 0)
-		exit_fatal(NULL, -1);
-	fcntl(sockfd, F_SETFL, O_NONBLOCK);
+		return exit_fatal(&server);
+	server.sockfd = sockfd;
+	fcntl(server.sockfd, F_SETFL, O_NONBLOCK);
 
 	int port = atoi(argv[1]);
 	struct sockaddr_in self;
@@ -163,11 +164,11 @@ int main(int argc, char** argv) {
 	self.sin_addr.s_addr = inet_addr("127.0.0.1");
 	self.sin_port = htons(port);
 
-	if (bind(sockfd, (struct sockaddr*)&self, len) != 0)
-		exit_fatal(NULL, sockfd);
+	if (bind(server.sockfd, (struct sockaddr*)&self, len) != 0)
+		return exit_fatal(&server);
 
-	if (listen(sockfd, 10) != 0)
-		exit_fatal(NULL, sockfd);
+	if (listen(server.sockfd, 10) != 0)
+		return exit_fatal(&server);
 
 	printf("Server open on port %d\n", port);
 
@@ -175,23 +176,18 @@ int main(int argc, char** argv) {
 
 	char buffer[BUFFER_SIZE];
 	char recv_buffer[BUFFER_SIZE];
-	state server;
-	server.clients = NULL;
-	server.total = 0;
 	fd_set reads;
 	fd_set writes;
 
 	// Main Loop
 
-	running = 1;
-	signal(SIGINT, stop);
-	while (running) {
+	while (1) {
 		FD_ZERO(&reads);
 		FD_ZERO(&writes);
-		FD_SET(sockfd, &reads);
+		FD_SET(server.sockfd, &reads);
 
 		// Add current clients to read and write
-		int max = sockfd;
+		int max = server.sockfd;
 		client* clt = server.clients;
 		while (clt) {
 			FD_SET(clt->fd, &reads);
@@ -205,7 +201,7 @@ int main(int argc, char** argv) {
 		// Loop trough existing clients
 		int activity = select(max + 1, &reads, &writes, NULL, NULL);
 		if (activity < 0)
-			exit_fatal(&server, sockfd);
+			return exit_fatal(&server);
 		else if (activity > 0) {
 			// New client on read for the server socket
 			if (FD_ISSET(sockfd, &reads)) {
@@ -214,7 +210,7 @@ int main(int argc, char** argv) {
 					fcntl(new_client, F_SETFL, O_NONBLOCK);
 					client* clt = NULL;
 					if (!(clt = (client*)malloc(sizeof(client))))
-						return exit_fatal(&server, sockfd);
+						return exit_fatal(&server);
 					clt->id = server.total++;
 					clt->fd = new_client;
 					clt->buffer = NULL;
@@ -225,7 +221,7 @@ int main(int argc, char** argv) {
 					else {
 						size_t length = sprintf(buffer, "server: client %ld just arrived\n", clt->id);
 						if (broadcast(&server, clt->id, buffer, length))
-							return exit_fatal(&server, sockfd);
+							return exit_fatal(&server);
 						client* curr = server.clients;
 						while (curr->next)
 							curr = curr->next;
@@ -241,18 +237,17 @@ int main(int argc, char** argv) {
 				if (FD_ISSET(clt->fd, &reads)) {
 					ssize_t received = recv(clt->fd, recv_buffer, BUFFER_SIZE - 1, MSG_DONTWAIT);
 					if (received < 0)
-						return exit_fatal(&server, sockfd);
+						return exit_fatal(&server);
 					else if (received == 0) {
 						size_t sender = clt->id;
+						size_t length = sprintf(buffer, "server: client %ld just left\n", sender);
+						if (broadcast(&server, sender, buffer, length))
+							return exit_fatal(&server);
 						client* next = clean_client(clt);
-						if (previous) {
-							previous->next = next;
-							size_t length = sprintf(buffer, "server: client %ld just left\n", sender);
-							if (broadcast(&server, sender, buffer, length))
-								return exit_fatal(&server, sockfd);
-						}
+						if (!previous)
+							server.clients = next;
 						else
-							server.clients = NULL;
+							previous->next = next;
 						clt = next;
 					}
 					else {
@@ -262,21 +257,8 @@ int main(int argc, char** argv) {
 						while (offset < received) {
 							int extracted = extract_message(recv_buffer + offset, &line);
 							if (extracted < 0)
-								return exit_fatal(&server, sockfd);
-							else if (extracted > 0) {
-								char* to_send = line;
-								if (clt->buffer) {
-									to_send = str_join(clt->buffer, line);
-									free(line);
-									clt->buffer = NULL;
-								}
-								size_t length = sprintf(buffer, "client %ld: %s", clt->id, to_send);
-								offset += strlen(to_send);
-								if (broadcast(&server, clt->id, buffer, length))
-									return exit_fatal(&server, sockfd);
-								free(to_send);
-							}
-							else {
+								return exit_fatal(&server);
+							else if (extracted == 0) {
 								if (!clt->buffer) {
 									char* cpy = NULL;
 									if (!(cpy = (char*)malloc(received + 1)))
@@ -290,6 +272,20 @@ int main(int argc, char** argv) {
 									clt->buffer = merged;
 								}
 								offset = received;
+							}
+							else {
+								size_t line_length = strlen(line);
+								offset += line_length;
+								char* to_send = line;
+								if (clt->buffer) {
+									to_send = str_join(clt->buffer, line);
+									free(line);
+									clt->buffer = NULL;
+								}
+								size_t length = sprintf(buffer, "client %ld: %s", clt->id, to_send);
+								free(to_send);
+								if (broadcast(&server, clt->id, buffer, length))
+									return exit_fatal(&server);
 							}
 						}
 						previous = clt;
@@ -318,5 +314,5 @@ int main(int argc, char** argv) {
 		}
 	}
 
-	return clean_exit(&server, sockfd, 0);
+	return clean_exit(&server, 0);
 }
