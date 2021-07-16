@@ -4,6 +4,8 @@ The goal of **mini_serv** is to create a simple server where client can connect 
 
 The ``extract_message`` and ``str_join`` functions are given to you when passing the exam, they are in ``main.c`` in the subject folder.
 
+>The function in this example are **not** the same as in the subject example, I suggest you check and understand the one that are given to you before you use them
+
 ## Compilation
 
 You can compile both **mini_serv** and the test **client** with:
