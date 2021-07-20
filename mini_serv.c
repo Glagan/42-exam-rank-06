@@ -12,14 +12,14 @@
 
 typedef struct s_message {
 	char* content;
-	size_t sender;
+	int sender;
 	size_t length;
 	size_t offset;
 	struct s_message* next;
 } message;
 
 typedef struct s_client {
-	size_t id;
+	int id;
 	int fd;
 	char* buffer;
 	message* queue;
@@ -27,7 +27,7 @@ typedef struct s_client {
 } client;
 
 typedef struct s_state {
-	size_t total;
+	int total;
 	int sockfd;
 	client* clients;
 } state;
@@ -54,20 +54,24 @@ int extract_message(const char* buffer, char** stk) {
 // Join to non-null strings in a newly allocated string.
 char* str_join(char* str1, char* str2) {
 	char* merged = NULL;
-	size_t len1 = strlen(str1);
+	size_t len1 = 0;
+	if (str1)
+		len1 = strlen(str1);
 	size_t len2 = strlen(str2);
 
 	if (!(merged = calloc(len1 + len2 + 1, sizeof(char))))
 		return NULL;
-	memcpy(merged, str1, len1);
+	if (str1)
+		memcpy(merged, str1, len1);
 	memcpy(merged + len1, str2, len2);
 	merged[len1 + len2] = 0;
-	free(str1);
+	if (str1)
+		free(str1);
 
 	return merged;
 }
 
-int broadcast(state* server, size_t sender, char* content, size_t length) {
+int broadcast(state* server, int sender, char* content, size_t length) {
 	printf("%s", content);
 	client* curr = server->clients;
 	while (curr) {
@@ -210,8 +214,10 @@ int main(int argc, char** argv) {
 				if (new_client) {
 					fcntl(new_client, F_SETFL, O_NONBLOCK);
 					client* clt = NULL;
-					if (!(clt = (client*)malloc(sizeof(client))))
+					if (!(clt = (client*)malloc(sizeof(client)))) {
+						close(new_client);
 						return exit_fatal(&server);
+					}
 					clt->id = server.total++;
 					clt->fd = new_client;
 					clt->buffer = NULL;
@@ -220,7 +226,7 @@ int main(int argc, char** argv) {
 					if (!server.clients)
 						server.clients = clt;
 					else {
-						size_t length = sprintf(buffer, "server: client %ld just arrived\n", clt->id);
+						size_t length = sprintf(buffer, "server: client %d just arrived\n", clt->id);
 						if (broadcast(&server, clt->id, buffer, length))
 							return exit_fatal(&server);
 						client* curr = server.clients;
@@ -234,22 +240,20 @@ int main(int argc, char** argv) {
 			// Handle read and write
 			client* previous = NULL;
 			client* clt = server.clients;
+			client* next = NULL;
 			while (clt) {
+				next = clt->next;
 				if (FD_ISSET(clt->fd, &reads)) {
 					ssize_t received = recv(clt->fd, recv_buffer, BUFFER_SIZE - 1, MSG_DONTWAIT);
-					if (received < 0)
-						return exit_fatal(&server);
-					else if (received == 0) {
-						size_t sender = clt->id;
-						size_t length = sprintf(buffer, "server: client %ld just left\n", sender);
-						if (broadcast(&server, sender, buffer, length))
+					if (received == 0) {
+						size_t length = sprintf(buffer, "server: client %d just left\n", clt->id);
+						if (broadcast(&server, clt->id, buffer, length))
 							return exit_fatal(&server);
-						client* next = clean_client(clt);
+						client* new_next = clean_client(clt);
 						if (!previous)
-							server.clients = next;
+							server.clients = new_next;
 						else
-							previous->next = next;
-						clt = next;
+							previous->next = new_next;
 					}
 					else {
 						recv_buffer[received] = 0;
@@ -260,58 +264,43 @@ int main(int argc, char** argv) {
 							if (extracted < 0)
 								return exit_fatal(&server);
 							else if (extracted == 0) {
-								if (!clt->buffer) {
-									char* cpy = NULL;
-									if (!(cpy = (char*)malloc(received + 1)))
-										return -1;
-									strcpy(cpy, recv_buffer);
-									cpy[received] = 0;
-									clt->buffer = cpy;
-								}
-								else {
-									char* merged = str_join(clt->buffer, recv_buffer);
-									clt->buffer = merged;
-								}
+								clt->buffer = str_join(clt->buffer, recv_buffer);
 								offset = received;
 							}
 							else {
 								size_t line_length = strlen(line);
 								offset += line_length;
-								char* to_send = line;
-								if (clt->buffer) {
-									to_send = str_join(clt->buffer, line);
-									clt->buffer = NULL;
-									free(line);
-									line = NULL;
-								}
-								size_t length = sprintf(buffer, "client %ld: %s", clt->id, to_send);
-								free(to_send);
+								char* to_send = str_join(clt->buffer, line);
+								free(line);
+								size_t length = sprintf(buffer, "client %d: ", clt->id);
 								if (broadcast(&server, clt->id, buffer, length))
 									return exit_fatal(&server);
+								if (broadcast(&server, clt->id, to_send, strlen(to_send))) {
+									free(to_send);
+									return exit_fatal(&server);
+								}
+								free(to_send);
 							}
 						}
 						previous = clt;
-						clt = clt->next;
 					}
 				}
-				else if (FD_ISSET(clt->fd, &writes) && clt->queue) {
+				if (FD_ISSET(clt->fd, &writes) && clt->queue) {
 					message* msg = clt->queue;
 					ssize_t sent = send(clt->fd, msg->content + msg->offset, msg->length - msg->offset, MSG_DONTWAIT);
-					if (msg->offset + sent < msg->length)
-						msg->offset += sent;
-					else {
-						message* next = msg->next;
-						free(msg->content);
-						free(msg);
-						clt->queue = next;
+					if (sent > 0) {
+						if (msg->offset + sent < msg->length)
+							msg->offset += sent;
+						else {
+							message* next_msg = msg->next;
+							free(msg->content);
+							free(msg);
+							clt->queue = next_msg;
+						}
 					}
 					previous = clt;
-					clt = clt->next;
 				}
-				else {
-					previous = clt;
-					clt = clt->next;
-				}
+				clt = next;
 			}
 		}
 	}

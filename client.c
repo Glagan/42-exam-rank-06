@@ -73,7 +73,7 @@ int main(int argc, char** argv) {
 		int activity = select(sockfd + 1, &reads, &writes, NULL, NULL);
 		if (activity > 0) {
 			if (FD_ISSET(sockfd, &reads)) {
-				int received = recv(sockfd, buffer, 65535, MSG_DONTWAIT);
+				int received = recv(sockfd, buffer, BUFFER_SIZE - 1, MSG_DONTWAIT);
 				if (received < 0) {
 					perror("recv()");
 					close(sockfd);
@@ -89,14 +89,14 @@ int main(int argc, char** argv) {
 					printf("%s", buffer);
 				}
 			}
-			else if (FD_ISSET(sockfd, &writes) && do_send) {
+			if (FD_ISSET(sockfd, &writes) && do_send) {
 				size_t length = strlen(buffer);
 				send(sockfd, buffer, length, MSG_DONTWAIT);
 				do_send = 0;
 				flag_ln++;
 			}
 			if (FD_ISSET(STDIN_FILENO, &reads)) {
-				ssize_t typed = read(STDIN_FILENO, buffer, BUFFER_SIZE);
+				ssize_t typed = read(STDIN_FILENO, buffer, BUFFER_SIZE - 1);
 				if (typed < 0) {
 					perror("read()");
 					close(sockfd);
